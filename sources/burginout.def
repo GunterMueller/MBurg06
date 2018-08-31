@@ -1,0 +1,82 @@
+(*
+ *  This program is copyright (c) 1995 Faculty of Information Technology,
+ *  Queensland University of Technology, Brisbane, Australia.
+ *  The program may be freely distributed in source or compiled form,
+ *  provided this copyright notice remains intact in the sources. 
+ *  Original program, June 1995, John Gough.
+ *)
+
+(* =============================== *
+ *  Support module for Mburg
+ *  (original kjg 29-April-1995)
+ * =============================== *)
+
+DEFINITION MODULE BurgInOut;
+  IMPORT UxFiles;
+
+  VAR hStart, hEnd : CARDINAL;			(* header start and end *)
+  VAR verbose, trace : BOOLEAN;
+
+  PROCEDURE CopyBlockH;				(* write header to mod  *)
+  PROCEDURE WriteMatchHeaders;			(* write file prefixes  *)
+  PROCEDURE WriteMatchTrailers;			(* write file trailers  *)
+  PROCEDURE CloseMatchFiles;
+
+  PROCEDURE ParseArgs;
+  PROCEDURE OpenFiles(VAR src,lst : UxFiles.File);
+  (* open the source and list files, abort if fail  *)
+  PROCEDURE OpenMatchFiles;
+  (* open the [prefix]match.mod file, abort if fail *)
+  PROCEDURE CloseFile(fil : UxFiles.File);
+
+ (* ------------------------------------------------------------------- *)
+
+  PROCEDURE DefProcM(pos,len : INTEGER);	(* emit match def headr *)
+  PROCEDURE ModProcM(pos,len : INTEGER);	(* emit match mod headr *)
+  PROCEDURE ModProcI(pos,len : INTEGER);	(* emit insert mod headr*)
+  PROCEDURE ModProcH(prodIdx : INTEGER);	(* emit helper mod headr*)
+  PROCEDURE EndProcM(pos,len : INTEGER);	(* emit match mod trailr*)
+  PROCEDURE EndProcI(pos,len : INTEGER);	(* emit insert mod trail*)
+  PROCEDURE EndProcH(prodIdx : INTEGER);	(* emit helper mod trail*)
+
+ (* ------------------------------------------------------------------- *)
+
+  PROCEDURE GetOpS;				(* string for "OP"      *)
+  PROCEDURE GetNewS;				(* string for "NEW"     *)
+  PROCEDURE GetEnumS;				(* string for "ENUM"    *)
+  PROCEDURE GetLeftS;				(* string for "LEFT"    *)
+  PROCEDURE GetRightS;				(* string for "RIGHT"   *)
+  PROCEDURE GetStateS;				(* string for "STATE"   *)
+  PROCEDURE GetMnameS;				(* string for "MNAME"   *)
+  PROCEDURE GetTnameS;				(* string for "TNAME"   *)
+
+ (* ------------------------------------------------------------------- *)
+
+  PROCEDURE WriteSmm(str : ARRAY OF CHAR);	(* emitstr to match mod *)
+  PROCEDURE WriteSmd(str : ARRAY OF CHAR);	(* emitstr to match def *)
+  PROCEDURE WriteSfm(str : ARRAY OF CHAR);	(* emitstr to form mod  *)
+  PROCEDURE WriteSfd(str : ARRAY OF CHAR);	(* emitstr to form def  *)
+  PROCEDURE WriteCmm(chr : CHAR);		(* emitchr to match mod *)
+  PROCEDURE WriteCmd(chr : CHAR);		(* emitchr to match def *)
+  PROCEDURE WriteCfm(chr : CHAR);		(* emitchr to form mod  *)
+  PROCEDURE WriteCfd(chr : CHAR);		(* emitchr to form def  *)
+  PROCEDURE WriteLmm();				(* emiteol to match mod *)
+  PROCEDURE WriteLmd();				(* emiteol to match def *)
+  PROCEDURE WriteLfm();				(* emiteol to form mod  *)
+  PROCEDURE WriteLfd();				(* emiteol to form def  *)
+
+ (* ------------------------------------------------------------------- *)
+
+  PROCEDURE IdErrorMessage(p : ARRAY OF CHAR;	(* message ---		*)
+			   pos,len : INTEGER;	(* "p"<"sym at pos">"s"	*)
+			   s : ARRAY OF CHAR);  (* goes to std error	*)
+
+  PROCEDURE ErrorMessage  (p : ARRAY OF CHAR;   (* message ---		*)
+			   m : ARRAY OF CHAR;   (* "p" <"m"> "s"	*)
+			   s : ARRAY OF CHAR);  (* goes to std error	*)
+
+  PROCEDURE InfoMessage   (p : ARRAY OF CHAR;	(* message ---		*)
+			   m : ARRAY OF CHAR;	(* "p" <"m"> "s"	*)
+			   s : ARRAY OF CHAR);	(* goes to std out	*)
+
+END BurgInOut.

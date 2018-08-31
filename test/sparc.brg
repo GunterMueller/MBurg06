@@ -1,0 +1,942 @@
+-- =======================================================================
+HEADER (* imports from sparc.brg header *)
+  FROM CgBuffering IMPORT OpCode,
+	NewVReg, DRxM, DRRM, DMxR, DMRR, DRRR, DRRx, DxRR, DRxx, 
+	DRRI, DRxI, DxRI, DxxI, Dxxx, DLxx, DxSx;
+  FROM CgRegisters IMPORT 
+	VRegister,physLim,zeroReg,
+        f0,f2,f4,f6,f8,f10,f12,f14,f16,f18,f20,f22,f24,f26,f28,f30,f31,fsr,
+	fp,sp,g1,g2,g4,g6,g7,o0,o1,o2,o4,o5,o7,l0,l2,l4,l6,l7,i0,i2,i4,i5;
+  FROM CgNameHandler IMPORT 
+	anonBkt, remBkt, uremBkt, divBkt, udivBkt, mulBkt, umulBkt, fpZeroBkt;
+  FROM CgAlphabets   IMPORT LabelType, RelopEnum, Conversion, HashBucketType;
+  FROM CgTemporaries IMPORT NewLabel;
+  FROM CgCodeGenerator IMPORT 
+	BackendTrap, TrapInfo, TrapType, FixTrapRegister;
+
+  FROM CgHelper IMPORT
+	Regvar, Entry, IsPow2, Log2, FitsInImmed, IsOctoAdr,
+	MkParW, MkParF, MkParD, MkDstP,
+	OoiCopyBlk, AarCopyVarBlk, DoRegTest,
+	CallAddr, CallName, CallNameTrap,
+	DrriMulW, DrrrMul, 
+	DrriDivI, DrrrDivI, DrrrSlash, SlashIPow2, SlashCPow2,
+	DrrrModI, DrriModI, RemIPow2, RemCPow2, DrrrRem,
+	TruncX, Cnvrt, MakeFltConst,
+	DrriRotate, DrrrRotate, DrrrShift, DrriShlWrd, DrriShrWrd, DrriShrInt,
+	DrrrAbsInt, DrrrAbsWrd,
+	LoadFlag, FalseJump, TrueJump;
+
+  TYPE  Powers2 = ARRAY [0 .. 31] OF INTEGER;
+  CONST pow2    = Powers2{1,2,4,8,16,32,64,128,256,512,1024,2048,4096,8192,
+			  16384,32768,65536,131072,262144,524288,1048576,
+			  2097152,4194304,8388608,16777216,33554432,67108864,
+			  134217728,268435456,536870912,1073741824,-2147483648};
+
+  TYPE  RelOpTable = ARRAY RelopEnum OF RelopEnum;
+  CONST revTab = RelOpTable{equ, neq, geq, gre, les, leq};
+			(* (equ, neq, leq, les, gre, geq) *)
+
+  TYPE  ConvertSet = SET OF Conversion;
+  CONST fltConvert = ConvertSet{fToI,fToC,fFlrI,fFlrC,fRndI,fRndC};
+  CONST dblConvert = ConvertSet{dToI,dToC,dFlrI,dFlrC,dRndI,dRndC};
+
+  CONST inlineLim = 6;
+
+  VAR trplab : LabelType;
+
+(* end of includes from sparc.brg *)
+  
+DECLARATIONS
+-- =======================================================================
+
+%start Stmt
+%term mkParW=1 mkParF=2 mkParD=3 truncN=4 truncV=5 convert=6
+      fpAdr=7 spAdr=8 literal=9 global=10 mkDstP=11 pshDstP=12 block=13
+      addWrd=14 addInt=15 addCrd=16 subWrd=17 subInt=18 subCrd=19 derefUB=20
+      derefSB=21 derefU16=22 derefS16=23 derefU32=24 derefS32=25 derefW=26
+      derefF=27 derefD=28 assignB=29 assign16=30 assign32=31 assignW=32
+      assignF=33 assignD=34 negWrd=35 bitNeg=36 absInt=37 absWrd=38 blkCp=39
+      mulWrd=40 mulInt=41 mulCrd=42 divInt=43 shlVar=44 modInt=45 modCrd=46
+      remInt=47 remCrd=48 slashI=49 slashC=50 rotate=51 orWrd=52 andWrd=53
+      xorWrd=54 test=55 brTrue=56 brFalse=57 jump=58 setRel=59 setIn=60
+      setIncl=61 setExcl=62 relInt=63 relCrd=64 relFlt=65 relDbl=66 addFlt=67
+      subFlt=68 mulFlt=69 divFlt=70 addDbl=71 subDbl=72 mulDbl=73 divDbl=74
+      shlWrd=75 shrWrd=76 shrInt=77 negFlt=78 negDbl=79 iLeaf=80 fLeaf=81
+      dLeaf=82 absFlt=83 absDbl=84 pshRetW=85 pshRetF=86 pshRetD=87 popRetW=88
+      popRetF=89 popRetD=90 negInt=91 procCall=92 infoBlk=93
+
+%OP "code"
+%LEFT "lOp"
+%RIGHT "rOp"
+%STATE "state"
+%MNAME "CgShadowStack"
+%TNAME "Tree"
+%ATTR < dReg : VRegister;
+	CASE : INTEGER OF
+	| 0 : wVal : SYSTEM.WORD;
+	| 1 : iReg : VRegister;
+	      hash : HashBucketType;
+	      ofst : INTEGER;
+	| 2 : lVal : INTEGER;
+	      hVal : INTEGER;
+	| 3 : dLab : CARDINAL;
+	      trap : TrapInfo;
+	| 4 : iVal : INTEGER;
+	| 5 : cVal : CARDINAL;
+	| 6 : relP : RelopEnum;
+	| 7 : cnvt : Conversion;
+	END; >
+%FORM < IMPORT SYSTEM;
+	FROM CgAlphabets IMPORT RelopEnum, HashBucketType, Conversion;
+	FROM CgCodeGenerator IMPORT TrapInfo;
+	FROM CgRegisters IMPORT VRegister; >
+
+-- =======================================================================
+-- Note on the D??? functions.
+-- These are the interface to the CgBuffering Module and write virtual
+-- assembly language into the buffer.  The "D" doesn't mean anything;
+-- the next char denotes the result operand R~Reg M~Mem x~none
+-- the next two are left and right operands, E.G. DRRI is R <- R op I.
+-- =======================================================================
+RULES
+-- =======================================================================
+-- assignment operators   ================================================
+-- =======================================================================
+
+Stmt= assignW(fpAdr,IReg)	& (Regvar($1.ofst) <> 0)
+	     (. DRRx(mov,Regvar($1.ofst),$2.dReg);.).
+
+Stmt= assignW(Addr,IReg)		1
+	     (. DMRR(st,$1.hash,$1.iReg,0,$1.ofst,$2.dReg);.).
+
+Stmt= assignW(addWrd(IReg,IReg),IReg) 	1
+	     (. DMRR(st,anonBkt,$1.dReg,$2.dReg,0,$3.dReg);.).
+
+-- =======================================================================
+
+Stmt= assignB(Addr,IReg)		1
+	     (. DMRR(stb,$1.hash,$1.iReg,0,$1.ofst,$2.dReg);.).
+
+Stmt= assignB(addWrd(IReg,IReg),IReg) 	1
+	     (. DMRR(stb,anonBkt,$1.dReg,$2.dReg,0,$3.dReg);.).
+
+-- =======================================================================
+
+Stmt= assign16(Addr,IReg)		1
+	     (. DMRR(sth,$1.hash,$1.iReg,0,$1.ofst,$2.dReg);.).
+
+Stmt= assign16(addWrd(IReg,IReg),IReg) 	1
+	     (. DMRR(sth,anonBkt,$1.dReg,$2.dReg,0,$3.dReg);.).
+
+-- =======================================================================
+
+Stmt= assignF(Addr,FReg)		1
+	     (. DMRR(fsts,$1.hash,$1.iReg,0,$1.ofst,$2.dReg);.).
+
+Stmt= assignF(addWrd(IReg,IReg),FReg) 	1
+	     (. DMRR(fsts,anonBkt,$1.dReg,$2.dReg,0,$3.dReg);.).
+
+-- =======================================================================
+
+Stmt= assignD(Addr,DReg)		1
+	     (. IF IsOctoAdr(%0) THEN
+		  DMxR(fstd,$1.hash,$1.iReg,$1.ofst,$2.dReg);
+		ELSE
+		  DMRR(fst2,$1.hash,$1.iReg,0,$1.ofst,$2.dReg);
+		END;.).
+
+Stmt= assignD(addWrd(IReg,IReg),DReg) 	1
+	     (. DMRR(fst2,anonBkt,$1.dReg,$2.dReg,0,$3.dReg);.).
+
+-- =======================================================================
+
+Stmt= blkCp(Imm,block(OfstA,OfstA))	
+	& ($1.cVal DIV %0^.$R^.$S.cVal < inlineLim)  6
+	     (. OoiCopyBlk(%0);.).
+
+Stmt= blkCp(IReg,block(Addr,Addr))	8
+	     (. AarCopyVarBlk(%0);.).
+
+-- =======================================================================
+-- parameter and proc calls   ============================================
+-- =======================================================================
+
+Stmt= mkParW(IReg)			1
+	     (. MkParW($0.iVal,%1,TRUE);.).	-- true means "in a reg"
+
+Stmt= mkParW(Imm)			1
+	     (. MkParW($0.iVal,%1,FALSE);.).	-- false means "is a lit"
+
+Stmt= mkParF(FReg)			2
+	     (. MkParF($0.iVal,%1,TRUE);.).	-- true means "in a reg"
+
+Stmt= mkParF(derefF(Addr))		2
+	     (. MkParF($0.iVal,%1,FALSE);.).	-- false means "in memory"
+
+Stmt= mkParD(DReg)			2
+	     (. MkParD($0.iVal,%1,TRUE);.).	-- true means "in a reg"
+
+Stmt= mkParD(derefD(Addr))		2
+	     (. MkParD($0.iVal,%1,FALSE);.).	-- false means "in memory"
+
+Stmt= mkDstP(IReg)			1
+	     (. MkDstP(%0);.).
+
+Stmt= procCall(Addr)
+	     (. CallAddr(%1); .).
+
+-- =======================================================================
+-- branching operations  =================================================
+-- =======================================================================
+
+Stmt= brTrue(Flag)			1
+	     (. TrueJump(%1^.code,$1.relP,$0.dLab);.) .
+
+Stmt= brFalse(Flag)			1
+	     (. FalseJump(%1^.code,$1.relP,$0.dLab);.) .
+
+Stmt= brTrue(IReg)			2
+	     (. DxRI(cmp,$1.dReg,0);
+		DLxx(jne,$0.dLab);.) .
+
+Stmt= brFalse(IReg)			2
+	     (. DxRI(cmp,$1.dReg,0);
+		DLxx(je,$0.dLab);.) .
+
+-- =======================================================================
+-- other statements ======================================================
+-- =======================================================================
+
+Stmt= jump(derefW(Addr))		1
+	     (. NewVReg($0.dReg);
+		DRxM(ld,$0.dReg,$1.hash,$1.iReg,$1.ofst);
+		DRxM(jmpl,zeroReg,$1.hash,$0.dReg,0);
+		Dxxx(nop);.).
+
+Stmt= popRetW(IReg)			
+	     (. DRRx(mov,i0,$1.dReg);.).
+
+Stmt= popRetF(FReg)			
+	     (. DRRx(fmovs,f0,$1.dReg);.).
+
+Stmt= popRetD(DReg)			
+	     (. DRRx(fmovd,f0,$1.dReg);.).
+
+-- =======================================================================
+-- dereference operators ... =============================================
+-- =======================================================================
+
+IReg= derefW(fpAdr)		& (Regvar($1.ofst) <> 0)
+	     (. $0.dReg := Regvar($1.ofst);.).	
+
+IReg= derefW(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(ld,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+IReg= derefW(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(ld,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+IReg= derefUB(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldub,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+IReg= derefUB(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldub,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+IReg= derefSB(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldsb,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+IReg= derefSB(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldsb,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+IReg= derefU16(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(lduh,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+IReg= derefU16(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(lduh,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+IReg= derefS16(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldsh,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+IReg= derefS16(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(ldsh,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+FReg= derefF(Addr)			1	
+	     (. NewVReg($0.dReg);
+		DRRM(flds,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);.).
+
+FReg= derefF(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(flds,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+-- =======================================================================
+
+DReg= derefD(Addr)			1	
+	     (. NewVReg($0.dReg);
+		IF IsOctoAdr(%1) THEN
+		  DRxM(fldd,$0.dReg,$1.hash,$1.iReg,$1.ofst);
+		ELSE
+		  DRRM(fld2,$0.dReg,$1.hash,$1.iReg,0,$1.ofst);
+		END; .).
+
+DReg= derefD(addWrd(IReg,IReg))		1	
+	     (. NewVReg($0.dReg);
+		DRRM(fld2,$0.dReg,anonBkt,$1.dReg,$2.dReg,0);.).
+
+IReg= pshDstP				1
+	     (. NewVReg($0.dReg);
+		DRxM(ld,$0.dReg,anonBkt,fp,64);.).
+
+-- =======================================================================
+-- addressing operations  ================================================
+-- =======================================================================
+
+Addr= OfstA					.
+
+Addr= NameA					.
+
+NameA= global					.
+
+Addr= addWrd(Addr,Imm)
+	     (. $0.hash := $1.hash;
+		$0.iReg := $1.iReg;
+		$0.ofst := $1.ofst + $2.iVal;.).
+
+Addr= addWrd(NameA,IReg)
+	     (. $0.hash := $1.hash;
+		$0.iReg := $2.dReg;
+		$0.ofst := $1.ofst;.).
+
+OfstA= spAdr					.
+
+OfstA= fpAdr					.
+
+OfstA= IReg				-- a reg on its own is an offset adr
+	     (. $0.iReg := $1.dReg;
+		$0.ofst := 0;
+		$0.dReg := 0;
+		$0.hash := anonBkt;.).
+
+NameA= addWrd(NameA,Imm)
+	     (. $0.hash := $1.hash;
+		$0.iReg := $1.dReg;
+		$0.ofst := $1.ofst + $2.iVal;.).
+
+OfstA= addWrd(OfstA,Imm)				
+	     (. $0.hash := anonBkt;
+		$0.iReg := $1.iReg;
+		$0.ofst := $1.ofst + $2.iVal;.).
+
+OfstA= addWrd(IReg,Imm)				
+	     (. $0.hash := anonBkt;
+		$0.iReg := $1.dReg;
+		$0.ofst := $2.iVal;.).
+
+-- =======================================================================
+-- addition operators ... ================================================
+-- =======================================================================
+
+IReg= addWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(add,$0.dReg,$1.dReg,$2.dReg);.).
+
+IReg= addInt(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(addcc,$0.dReg,$1.dReg,$2.dReg);
+		NewLabel(trplab);
+		DLxx(bvs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= addCrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(addcc,$0.dReg,$1.dReg,$2.dReg);
+		NewLabel(trplab);
+		DLxx(bcs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= addWrd(IReg,Imm)	& FitsInImmed($2.iVal)	1	
+	     (. NewVReg($0.dReg);
+		DRRI(add,$0.dReg,$1.dReg,$2.iVal);.).
+
+IReg= addInt(IReg,Imm)	& FitsInImmed($2.iVal)	1	
+	     (. NewVReg($0.dReg);
+		DRRI(addcc,$0.dReg,$1.dReg,$2.iVal);
+		NewLabel(trplab);
+		DLxx(bvs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= addCrd(IReg,Imm)	& FitsInImmed($2.iVal) 1	
+	     (. NewVReg($0.dReg);
+		DRRI(addcc,$0.dReg,$1.dReg,$2.iVal);
+		NewLabel(trplab);
+		DLxx(bcs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+-- =======================================================================
+
+IReg= subWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(sub,$0.dReg,$1.dReg,$2.dReg);.).
+
+IReg= subInt(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(subcc,$0.dReg,$1.dReg,$2.dReg);
+		NewLabel(trplab);
+		DLxx(bvs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= subCrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(subcc,$0.dReg,$1.dReg,$2.dReg);
+		NewLabel(trplab);
+		DLxx(bcs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= subWrd(IReg,Imm)	& FitsInImmed($2.iVal)	1	
+	     (. NewVReg($0.dReg);
+		DRRI(sub,$0.dReg,$1.dReg,$2.iVal);.).
+
+IReg= subInt(IReg,Imm)	& FitsInImmed($2.iVal)	1	
+	     (. NewVReg($0.dReg);
+		DRRI(subcc,$0.dReg,$1.dReg,$2.iVal);
+		NewLabel(trplab);
+		DLxx(bvs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= subCrd(IReg,Imm)	& FitsInImmed($2.iVal) 1	
+	     (. NewVReg($0.dReg);
+		DRRI(subcc,$0.dReg,$1.dReg,$2.iVal);
+		NewLabel(trplab);
+		DLxx(bcs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+FReg= addFlt(FReg,FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fadds,$0.dReg,$1.dReg,$2.dReg);.).
+
+DReg= addDbl(DReg,DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(faddd,$0.dReg,$1.dReg,$2.dReg);.).
+
+FReg= subFlt(FReg,FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fsubs,$0.dReg,$1.dReg,$2.dReg);.).
+
+DReg= subDbl(DReg,DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fsubd,$0.dReg,$1.dReg,$2.dReg);.).
+
+-- =======================================================================
+-- multiply operators ... most work is done in CgHelper ==================
+-- =======================================================================
+
+IReg= mulInt(IReg,IReg)		8	
+	     (. NewVReg($0.dReg);
+		DrrrMul(%0);.).
+
+IReg= mulCrd(IReg,IReg)		8	
+	     (. NewVReg($0.dReg);
+		DrrrMul(%0);.).
+
+IReg= mulWrd(IReg,IReg)		8	
+	     (. NewVReg($0.dReg);
+		DrrrMul(%0);.).
+
+IReg= mulWrd(IReg,Imm)		4
+	     (. IF $2.iVal = 1 THEN
+		  $0.dReg := $1.dReg;
+		ELSE
+		  NewVReg($0.dReg);
+		  DrriMulW(%0);
+		END;.).
+
+IReg= mulInt(IReg,Imm)	& ($2.iVal = 1)
+	     (. $0.dReg := $1.dReg;.).
+
+IReg= mulCrd(IReg,Imm)	& ($2.iVal = 1)
+	     (. $0.dReg := $1.dReg;.).
+
+FReg= mulFlt(FReg,FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fmuls,$0.dReg,$1.dReg,$2.dReg);.).
+
+DReg= mulDbl(DReg,DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fmuld,$0.dReg,$1.dReg,$2.dReg);.).
+
+-- =======================================================================
+-- division operators ... most work is done in CgHelper ==================
+-- there is no divCrd, since this is the same as slashC ==================
+-- =======================================================================
+
+IReg= divInt(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrDivI(%0);.).
+
+IReg= divInt(IReg,Imm)		7
+	     (. NewVReg($0.dReg);
+		DrriDivI(%0);.).
+
+IReg= divInt(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. IF $2.iVal = 1 THEN
+		  $0.dReg := $1.dReg;
+		ELSE
+ 		  NewVReg($0.dReg);
+		  IF $2.iVal = MIN(INTEGER) THEN
+		    DRRI(srl,$0.dReg,$1.dReg,31);
+		  ELSE
+		    DRRI(sra,$0.dReg,$1.dReg,Log2($2.cVal));
+		  END;
+		END;.).
+
+FReg= divFlt(FReg,FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fdivs,$0.dReg,$1.dReg,$2.dReg);.).
+
+DReg= divDbl(DReg,DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRR(fdivd,$0.dReg,$1.dReg,$2.dReg);.).
+
+-- =======================================================================
+
+IReg= modInt(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrModI(%0);.).
+
+IReg= modInt(IReg,Imm)		7
+	     (. NewVReg($0.dReg);
+		DrriModI(%0);.).
+
+IReg= modInt(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. NewVReg($0.dReg);
+		RemCPow2(%0); (* this does the DIV *).).
+
+-- =======================================================================
+
+IReg= slashC(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. NewVReg($0.dReg);
+		SlashCPow2(%0);.).
+
+IReg= slashC(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrSlash(%0);.).
+
+IReg= slashI(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. NewVReg($0.dReg);
+		SlashIPow2(%0);.).
+
+IReg= slashI(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrSlash(%0);.).
+
+-- =======================================================================
+
+IReg= remInt(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. NewVReg($0.dReg);
+		RemIPow2(%0);.).
+
+IReg= remInt(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrRem(%0);.).
+
+IReg= remCrd(IReg,Imm)	& IsPow2($2.iVal) 1
+	     (. NewVReg($0.dReg);
+		RemCPow2(%0);.).
+
+IReg= remCrd(IReg,IReg)		8
+	     (. NewVReg($0.dReg);
+		DrrrRem(%0);.).
+
+-- =======================================================================
+-- All of the other binary operations ====================================
+-- =======================================================================
+
+IReg= andWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(and,$0.dReg,$1.dReg,$2.dReg);.).
+
+IReg= andWrd(IReg,Imm)	& FitsInImmed($2.iVal) 1	
+	     (. IF $0.iVal = -1 THEN
+		  $0.dReg := $1.dReg;
+		ELSE
+		  NewVReg($0.dReg);
+		  DRRI(and,$0.dReg,$1.dReg,$2.iVal);
+		END;.).
+
+IReg= orWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(or,$0.dReg,$1.dReg,$2.dReg);.).
+
+IReg= orWrd(IReg,Imm)		& FitsInImmed($2.iVal) 1	
+	     (. IF $0.iVal = 0 THEN
+		  $0.dReg := $1.dReg;
+		ELSE
+		  NewVReg($0.dReg);
+		  DRRI(or,$0.dReg,$1.dReg,$2.iVal);
+		END;.).
+
+IReg= xorWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DRRR(xor,$0.dReg,$1.dReg,$2.dReg);.).
+
+IReg= xorWrd(IReg,Imm)	& FitsInImmed($2.iVal) 1	
+	     (. IF $2.iVal = 0 THEN
+		  $0.dReg := $1.dReg;
+		ELSE
+		  NewVReg($0.dReg);
+		  DRRI(xor,$0.dReg,$1.dReg,$2.iVal);
+		END;.).
+
+-- =======================================================================
+
+IReg= rotate(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DrrrRotate(%0);.).
+
+IReg= rotate(IReg,Imm)			1	
+	     (. NewVReg($0.dReg);
+		DrriRotate(%0);.).
+
+IReg= shlVar(IReg,IReg)			1	-- must be RRR
+	     (. NewVReg($0.dReg);
+		DrrrShift(%0);.).
+
+IReg= shlWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DrrrShift(%0);.).
+
+IReg= shlWrd(IReg,Imm)			1	-- can be RRI
+	     (. NewVReg($0.dReg);
+		DrriShlWrd(%0);.).
+
+IReg= shrWrd(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DrrrShift(%0);.).
+
+IReg= shrWrd(IReg,Imm)			1	-- can be RRI
+	     (. NewVReg($0.dReg);
+		DrriShrWrd(%0);.).
+
+IReg= shrInt(IReg,IReg)			1	
+	     (. NewVReg($0.dReg);
+		DrrrShift(%0);.).
+
+IReg= shrInt(IReg,Imm)			1	-- can be RRI
+	     (. NewVReg($0.dReg);
+		DrriShrInt(%0);.).
+
+-- =======================================================================
+-- All of the other unary operations =====================================
+-- =======================================================================
+
+IReg= bitNeg(IReg)				1
+	     (. NewVReg($0.dReg);
+		DRRx(not,$0.dReg,$1.dReg);.).
+
+IReg= negWrd(IReg)				1
+	     (. NewVReg($0.dReg);
+		DRRR(sub,$0.dReg,zeroReg,$1.dReg);.).
+
+IReg= negInt(IReg)				1
+	     (. NewVReg($0.dReg);
+		DRRR(subcc,$0.dReg,zeroReg,$1.dReg);
+		NewLabel(trplab);
+		DLxx(bvs,trplab);
+		BackendTrap(ovflow,trplab);.).
+
+IReg= absWrd(IReg)				1
+	     (. NewVReg($0.dReg);
+		DrrrAbsWrd(%0);.).
+
+IReg= absInt(IReg)				1
+	     (. NewVReg($0.dReg);
+		DrrrAbsInt(%0);.).
+
+FReg= absFlt(FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRx(fabss,$0.dReg,$1.dReg);.).
+
+DReg= absDbl(DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRx(fabsd,$0.dReg,$1.dReg);.).
+
+FReg= negFlt(FReg)				2
+	     (. NewVReg($0.dReg);
+		DRRx(fnegs,$0.dReg,$1.dReg);.).
+
+DReg= negDbl(DReg)				2
+	     (. NewVReg($0.dReg);
+		DRRx(fnegd,$0.dReg,$1.dReg);.).
+
+-- =======================================================================
+-- All of the relational operators =======================================
+-- =======================================================================
+
+Flag= relInt(IReg,IReg)		1
+	     (. DxRR(cmp,$1.dReg,$2.dReg);.) .
+
+Flag= relInt(IReg,Imm)	& FitsInImmed($2.iVal)	1
+	     (. DxRI(cmp,$1.dReg,$2.iVal);.) .
+
+Flag= relInt(Imm,IReg)	& FitsInImmed($1.iVal)	1
+	     (. $0.relP := revTab[$0.relP];
+		DxRI(cmp,$2.dReg,$1.iVal);.) .
+
+Flag= relCrd(IReg,IReg)		1
+	     (. DxRR(cmp,$1.dReg,$2.dReg);.) .
+
+Flag= relCrd(IReg,Imm)	& FitsInImmed($2.iVal)	1
+	     (. DxRI(cmp,$1.dReg,$2.iVal);.) .
+
+Flag= relCrd(Imm,IReg)	& FitsInImmed($1.iVal)	1
+	     (. $0.relP := revTab[$0.relP];
+		DxRI(cmp,$2.dReg,$1.iVal);.) .
+
+Flag= relFlt(FReg,FReg)		2
+	     (. NewLabel(trplab);
+		BackendTrap(NaN,trplab);
+		DxRR(fcmps,$1.dReg,$2.dReg);
+		DLxx(fbu,trplab);.).
+
+Flag= relDbl(DReg,DReg)		2
+	     (. NewLabel(trplab);
+		BackendTrap(NaN,trplab);
+		DxRR(fcmpd,$1.dReg,$2.dReg);
+		DLxx(fbu,trplab);.).
+
+Flag= setRel(IReg,IReg)
+	     (. NewVReg($0.dReg);
+		IF $0.relP = leq THEN
+		  DRRR(and,$0.dReg,$2.dReg,$1.dReg);
+		  DxRR(cmp,$0.dReg,$1.dReg);
+		ELSE (* $0.relP = geq *)
+		  DRRR(and,$0.dReg,$1.dReg,$2.dReg);
+		  DxRR(cmp,$0.dReg,$2.dReg);
+		END; .).
+
+IReg= setIn(IReg,IReg)	2	-- IN can return a reg value
+	     (. <VAR dst : VRegister;>	-- for the sparc architecture
+		NewVReg(dst); NewVReg($0.dReg);
+		DRRR(srl,dst,$1.dReg,$2.dReg);
+		DRRI(and,$0.dReg,dst,1);.).
+		
+Flag= setIn(IReg,IReg)	2
+	     (. <VAR dst : VRegister;>
+		NewVReg(dst);
+		DRRR(srl,dst,$1.dReg,$2.dReg);
+		DRRI(andcc,zeroReg,dst,1);.).
+
+IReg= setIn(IReg,Imm)		2
+	     (. <VAR dst : VRegister;>
+		NewVReg(dst); NewVReg($0.dReg);
+		DRRI(srl,dst,$1.dReg,$2.cVal);
+		DRRI(and,$0.dReg,dst,1);.).
+
+Flag= setIn(IReg,Imm)		1
+	     (. <VAR new : VRegister;>
+		IF $2.cVal <= 11 THEN
+		  DRRI(andcc,zeroReg,$1.dReg,pow2[$2.cVal]);
+		ELSE
+		  NewVReg(new);
+		  DRRI(srl,new,$1.dReg,$2.iVal);
+		  DRRI(andcc,zeroReg,new,1);
+		END;.).
+		
+-- =======================================================================
+-- Various load chain productions ========================================
+-- =======================================================================
+
+IReg= Flag				3
+	     (. NewVReg($0.dReg);
+		LoadFlag(%1,1,0);.).
+
+IReg= Imm				1	
+	     (. IF $1.iVal = 0 THEN
+		  $0.dReg := zeroReg;
+		ELSE
+		  NewVReg($0.dReg);
+		  DRxI(set,$0.dReg,anonBkt,$1.iVal);
+		END;.).
+
+IReg= NameA				2
+	     (. NewVReg($0.dReg);
+		DRxI(set,$0.dReg,$1.hash,$1.ofst);.).
+
+IReg= iLeaf					.
+
+FReg= fLeaf					.
+
+FReg= Imm				1	
+	     (. NewVReg($0.dReg);
+		DRxM(flds,$0.dReg,MakeFltConst($1.iVal),0,0);.).
+
+DReg= dLeaf					.
+
+IReg= OfstA				1
+	     (. <VAR tmp,dst : VRegister;>
+		NewVReg(dst);
+		IF FitsInImmed($1.ofst) THEN
+		  DRRI(add,dst,$0.iReg,$1.ofst);
+		ELSE
+		  NewVReg(tmp);
+		  DRxI(set,tmp,$1.hash,$1.ofst);
+		  DRRR(add,dst,$0.iReg,tmp);
+		END;
+		$0.dReg := dst;.).
+
+IReg= Addr				3
+	     (.<VAR new : VRegister;>
+		NewVReg(new); NewVReg($0.dReg);
+		DRxI(set,new,$1.hash,$1.ofst);
+		DRRR(add,$0.dReg,new,$1.iReg); .).
+
+-- =======================================================================
+-- various conversions  ==================================================
+-- =======================================================================
+
+IReg= truncN(FReg)			& ($0.cnvt IN fltConvert) 1
+	     (. NewVReg($0.dReg);
+		TruncX(%0,FALSE);.).
+
+IReg= truncN(DReg)			& ($0.cnvt IN dblConvert) 1
+	     (. NewVReg($0.dReg);
+		TruncX(%0,FALSE);.).
+
+IReg= truncV(FReg)			& ($0.cnvt IN fltConvert) 1
+	     (. NewVReg($0.dReg);
+		TruncX(%0,TRUE);.).
+
+IReg= truncV(DReg)			& ($0.cnvt IN dblConvert) 1
+	     (. NewVReg($0.dReg);
+		TruncX(%0,TRUE);.).
+
+FReg= convert(IReg)		& (($0.cnvt = iToF) OR ($0.cnvt = cToF)) 1
+	     (. NewVReg($0.dReg);
+		Cnvrt(%0);.).
+
+DReg= convert(IReg)		& (($0.cnvt = iToD) OR ($0.cnvt = cToD)) 1
+	     (. NewVReg($0.dReg);
+		Cnvrt(%0);.).
+
+DReg= convert(FReg)		& ($0.cnvt = fToD) 1
+	     (. NewVReg($0.dReg);
+		Cnvrt(%0);.).
+
+FReg= convert(DReg)		& ($0.cnvt = dToF) 1
+	     (. NewVReg($0.dReg);
+		Cnvrt(%0);.).
+
+-- =======================================================================
+-- Set include and exclude operations ====================================
+-- =======================================================================
+
+IReg= setIncl(IReg,Imm)		1
+	     (. NewVReg($0.dReg);
+		IF $2.cVal <= 11 THEN
+		  DRRI(or,$0.dReg,$1.dReg,pow2[$2.cVal]);
+		ELSE
+		  NewVReg($2.dReg);
+		  DRxI(sethi,$2.dReg,anonBkt,pow2[$2.cVal]);
+		  DRRR(or,$0.dReg,$1.dReg,$2.dReg);
+		END;.).
+		
+IReg= setIncl(IReg,IReg)		3
+	      (.<VAR  v1,v2 : VRegister;>
+		NewVReg(v2); NewVReg(v1); NewVReg($0.dReg);
+		DRxI(set,v1,anonBkt,1);
+		DRRR(sll,v2,v1,$2.dReg);
+		DRRR(or,$0.dReg,$1.dReg,v2);.).
+		
+IReg= setExcl(IReg,Imm)		1
+	     (. NewVReg($0.dReg);
+		IF $2.cVal <= 11 THEN
+		  DRRI(andn,$0.dReg,$1.dReg,pow2[$2.cVal]);
+		ELSE
+		  NewVReg($2.dReg);
+		  DRxI(sethi,$2.dReg,anonBkt,pow2[$2.cVal]);
+		  DRRR(andn,$0.dReg,$1.dReg,$2.dReg);
+		END;.).
+		
+IReg= setExcl(IReg,IReg)		3
+	      (.<VAR  v1,v2 : VRegister;>
+		NewVReg(v2); NewVReg(v1); NewVReg($0.dReg);
+		DRxI(set,v1,anonBkt,1);
+		DRRR(sll,v2,v1,$2.dReg);
+		DRRR(andn,$0.dReg,$1.dReg,v2);.).
+		
+-- =======================================================================
+-- temporary manipulations ===============================================
+-- =======================================================================
+
+Stmt= Temp					.
+
+AnyV= IReg			-- move to a virtual register if necessary
+	     (.<VAR dst : VRegister;>
+		IF $1.dReg < physLim THEN 
+		  NewVReg(dst);
+		  DRRx(mov,dst,$1.dReg);
+		  $0.dReg := dst;
+		END;
+		%0^.code := iLeaf;.).
+
+AnyV= FReg			-- move to a virtual register if necessary
+	     (.<VAR dst : VRegister;>
+		IF $1.dReg < physLim THEN 
+		  NewVReg(dst);
+		  DRRx(fmovs,dst,$1.dReg);
+		  $0.dReg := dst;
+		END;
+		%0^.code := fLeaf;.).
+
+AnyV= DReg			-- move to a virtual register if necessary
+	     (.<VAR dst : VRegister;>
+		IF $1.dReg < physLim THEN 
+		  NewVReg(dst);
+		  DRRx(fmovd,dst,$1.dReg);
+		  $0.dReg := dst;
+		END;
+		%0^.code := dLeaf;.).
+
+Temp= AnyV					.
+
+Temp= Imm					.
+
+Temp= NameA					.
+
+Temp= fpAdr					.
+
+Temp= spAdr					.
+
+Imm= literal					.
+
+IReg= test(IReg,infoBlk)			2
+	     (. FixTrapRegister($1.dReg,$2.trap);
+		$0.dReg := $1.dReg;
+		DoRegTest($1.dReg,$0.lVal,$0.hVal,$2.dLab);.).
+
+Stmt= test(IReg,infoBlk)			2
+ 	     (. FixTrapRegister($1.dReg,$2.trap);
+		DoRegTest($1.dReg,$0.lVal,$0.hVal,$2.dLab);.).
+
+-- =======================================================================
+ENDRULES
+-- =======================================================================

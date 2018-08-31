@@ -1,0 +1,111 @@
+(*  This program is copyright (c) 1995 Faculty of Information Technology,
+ *  Queensland University of Technology, Brisbane, Australia.
+ *  The program may be freely distributed in source or compiled form,
+ *  provided this copyright notice remains intact in the sources. 
+ *  Original program, June 1995, John Gough.
+ *)
+
+DEFINITION MODULE BurgAst;
+  IMPORT CardSequences;
+
+  CONST maxProd   = 255;
+	maxTerm   = 255;
+	maxNonT   = 255;
+	invalid   = -1;	  (* invalid arity *)
+	unknown   = -2;	  (* invalid arity *)
+
+  TYPE  HelperBlk;
+	ProdIndex = [0 .. maxProd];
+	TermIndex = [0 .. maxTerm];
+	NonTermIx = [0 .. maxNonT];
+
+  TYPE  Tree = POINTER TO TreeRec;
+	TreeRec =
+	  RECORD
+	    CASE isChain : BOOLEAN OF
+	    | TRUE  : nonTerm  : NonTermIx;
+	    | FALSE : terminal : TermIndex;
+		      left     : Tree;		(* or NIL *)
+		      right    : Tree;		(* or NIL *)
+	    END;
+	  END;
+	    
+  TYPE  ProdRec  =
+	  RECORD
+	    lhsNonTerm  : INTEGER;
+	    rhs		: Tree;
+	    strings	: HelperBlk;
+	    prodCost    : INTEGER;
+	    nonZeros    : INTEGER;
+	    textBegin   : INTEGER;  (* start of pattern		 *)
+	    textLength  : INTEGER;  (* length of pattern	 *)
+	    predBegin   : INTEGER;  (* start of pred if present  *)
+	    predLength  : INTEGER;  (* length of pred if exists  *)
+	    semPos      : INTEGER;  (* char pos of first token   *)
+	    semCol      : INTEGER;  (* column pos of first token *)
+	    semEnd      : INTEGER;  (* char pos of last token    *)
+	    decPos      : INTEGER;  (* char pos of first token   *)
+	    decCol      : INTEGER;  (* column pos of first token *)
+	    decEnd      : INTEGER;  (* char pos of last token    *)
+	  END;
+
+  TYPE	TermRec =
+	  RECORD
+	    pos, len  : INTEGER;
+	    termArity : INTEGER;
+	    prodList  : CardSequences.Sequence; (* prods starting with this *)
+	  END;
+
+  TYPE	NTRecord =
+	  RECORD
+	    reached   : BOOLEAN;
+	    terminates: BOOLEAN;
+	    pos, len  : INTEGER;
+	    chainSeq  : CardSequences.Sequence; (* chain prods linked to NT  *)
+	    prodIdxs  : CardSequences.Sequence; (* productions for this NT   *)
+	  END;
+
+  VAR   goalSmbl : NonTermIx;
+	 
+  VAR   termInfo : ARRAY TermIndex OF TermRec;
+	nonTermI : ARRAY NonTermIx OF NTRecord;
+  	prodInfo : ARRAY ProdIndex OF ProdRec;
+
+  VAR	inclPos, inclCol, inclEnd : CARDINAL;     (* state inclusion info *)
+	formPos, formCol, formEnd : CARDINAL;     (* formdef import info  *)
+
+ (* =================================================================== *)
+
+  PROCEDURE EnterNT(pos : INTEGER;
+		    len : INTEGER;
+		VAR idx : INTEGER);
+
+  PROCEDURE NewTerm(pos : INTEGER;
+		    len : INTEGER;
+		    idx : INTEGER);
+
+  PROCEDURE LookupT(pos : INTEGER;
+		    len : INTEGER;
+		VAR idx : INTEGER);
+
+  PROCEDURE EnterProd(pos : INTEGER;
+		      lhs : NonTermIx;
+		      rhs : Tree;
+                  VAR idx : ProdIndex);
+
+  PROCEDURE EnterArity(idx : TermIndex;
+		       num : INTEGER);
+
+  PROCEDURE NewTmTree(idnt : TermIndex) : Tree;
+  PROCEDURE NewNtTree(idnt : NonTermIx) : Tree;
+
+ (* =================================================================== *)
+
+  PROCEDURE Check;
+  PROCEDURE MakeModBody;
+  PROCEDURE MakeInitializers;
+  PROCEDURE GenerateMatchers;
+  PROCEDURE GenerateInserts;
+  PROCEDURE GenerateHelpers;
+
+END BurgAst.

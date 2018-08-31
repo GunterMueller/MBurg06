@@ -1,0 +1,14 @@
+DEFINITION MODULE MburgG;
+
+CONST
+  EOFSYM = 0;  identifierSym = 1;  numberSym = 2;  stringSym = 3;
+  HEADERSym = 4;  DECLARATIONSSym = 5;  RULESSym = 6;  ENDRULESSym = 7;
+  percentstartSym = 8;  percentOPSym = 9;  percentNEWSym = 10;
+  percentENUMSym = 11;  percentLEFTSym = 12;  percentRIGHTSym = 13;
+  percentSTATESym = 14;  percentMNAMESym = 15;  percentTNAMESym = 16;
+  percentATTRSym = 17;  lessSym = 18;  greaterSym = 19;  percentFORMSym = 20;
+  percenttermSym = 21;  equalSym = 22;  pointSym = 23;  lparenpointSym = 24;
+  pointrparenSym = 25;  lparenSym = 26;  commaSym = 27;  rparenSym = 28;
+  andSym = 29;  NOSYM = 30;
+
+END MburgG.

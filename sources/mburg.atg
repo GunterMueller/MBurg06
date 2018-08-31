@@ -1,0 +1,239 @@
+(*
+ *  This program is copyright (c) 1995 Faculty of Information Technology,
+ *  Queensland University of Technology, Brisbane, Australia.
+ *  The program may be freely distributed in source or compiled form,
+ *  provided this copyright notice remains intact in the sources. 
+ *  Original program, June 1995, John Gough.
+ *)
+
+(* meta-grammar for mburg *)
+
+COMPILER Mburg
+
+IMPORT BurgInOut, BurgAst, CardSequences;
+
+ (* ------------------------------------------------------- *)
+
+  PROCEDURE GetNumber (VAR int : INTEGER);
+  (* Convert latest token to integer value Int *)
+    VAR
+      i : CARDINAL;
+      string : ARRAY [0 .. 20] OF CHAR;
+    BEGIN
+      MburgS.GetString(MburgS.pos, MburgS.len, string);
+      i := 0; int := 0;
+      WHILE string[i] # 0C DO
+        int := 10 * int + VAL(INTEGER, ORD(string[i]) - ORD('0')); INC(i)
+      END;
+    END GetNumber;
+ 
+ (* ------------------------------------------------------- *)
+
+CHARACTERS
+  eol      = CHR(10).
+  letter = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".
+  lowline  = "_".
+  digit    = "0123456789".
+  noquote1 = ANY - "'" - eol .
+  noquote2 = ANY - '"' - eol .
+
+IGNORE CHR(1) .. CHR(31)
+
+COMMENTS FROM "--" TO eol
+
+TOKENS
+  identifier = (letter | lowline | "$" | "%") {letter | lowline | digit}.
+  number     = digit { digit}.
+  string     =  ('"' {noquote2} '"' | "'" {noquote1} "'") .
+
+PRODUCTIONS          (* semantic actions *)
+(* -------------------------------------------------------------------- *)
+(* Mburg = "HEADER" {ANY} "DECLARATIONS" {Declaration} 			*)
+(*		"RULES" {Rule} "ENDRULES" .				*)
+(* -------------------------------------------------------------------- *)
+  Mburg =
+	"HEADER"        (. BurgInOut.hStart := MburgS.nextPos.)
+	{ ANY }         (. BurgInOut.hEnd   := MburgS.nextPos.)
+    	"DECLARATIONS"
+    	{ Declaration }
+    	"RULES"
+    	{ Rule }
+	"ENDRULES" .
+
+(* -------------------------------------------------------------------- *)
+(* Declaration  = "%start NonTerm | "%OP" string   | "%ENUM string 	*)
+(*		| "%LEFT" string  | "%RIGHT string | "%STATE" string	*)
+(*		| "%MNAME string  | "%TNAME string 			*)
+(*		| "%term { identifier "=" number} .			*)
+(* -------------------------------------------------------------------- *)
+  Declaration        (. VAR ntId : INTEGER;
+                            tPos : INTEGER;
+                            tLen : INTEGER;
+                            numb : INTEGER;.)
+	=
+    	"%start" NonTerm<ntId>
+                     (. BurgAst.goalSmbl := ntId.)
+  | 	"%OP"  string
+                     (. BurgInOut.GetOpS.) 
+  | 	"%NEW"  string
+                     (. BurgInOut.GetNewS.) 
+  | 	"%ENUM"  string
+                     (. BurgInOut.GetEnumS.) 
+  | 	"%LEFT"  string
+                     (. BurgInOut.GetLeftS.) 
+  | 	"%RIGHT" string
+                     (. BurgInOut.GetRightS.) 
+  | 	"%STATE" string
+                     (. BurgInOut.GetStateS.) 
+  | 	"%MNAME" string
+                     (. BurgInOut.GetMnameS.) 
+  | 	"%TNAME" string
+                     (. BurgInOut.GetTnameS.) 
+  |     "%ATTR" "<"  (. BurgAst.inclPos := MburgS.nextPos;
+                        BurgAst.inclCol := MburgS.nextCol.)
+	  {ANY}      (. BurgAst.inclEnd := MburgS.pos + INT(MburgS.len).)
+	  ">"
+  |     "%FORM" "<"  (. BurgAst.formPos := MburgS.nextPos;
+                        BurgAst.formCol := MburgS.nextCol.)
+	  {ANY}      (. BurgAst.formEnd := MburgS.pos + INT(MburgS.len).)
+	  ">"
+  | 	"%term" 
+        {
+	identifier   (. tPos := MburgS.pos;
+                        tLen := MburgS.len.)
+	"=" number   (. GetNumber(numb);
+                        BurgAst.NewTerm(tPos,tLen,numb).)
+	} . 
+
+(* -------------------------------------------------------------------- *)
+(* Rule = NonTerm "=" Tree PredFunc Cost "(." {ANY} ".)" .		*)
+(* -------------------------------------------------------------------- *)
+  Rule               (. VAR ntId : INTEGER;
+                            iPos : INTEGER;
+                            prod : BurgAst.ProdIndex;
+                            tree : BurgAst.Tree;.)
+	=            (. iPos := MburgS.nextPos.)
+	NonTerm<ntId>
+	"="  Tree<tree>         
+                     (. BurgAst.EnterProd(iPos,ntId,tree,prod).)
+	     PredFunc<prod>
+   (* ----------------------- semantic actions ----------------------------- *)
+   (. IF tree^.isChain THEN 
+        CardSequences.LinkRight(BurgAst.nonTermI[tree^.nonTerm].chainSeq,prod);
+        IF BurgAst.prodInfo[prod].predBegin <> 0 THEN
+          Error(50); BurgInOut.IdErrorMessage(
+            "chain production of symbol",BurgAst.nonTermI[tree^.nonTerm].pos,
+            BurgAst.nonTermI[tree^.nonTerm].len,"cannot be conditional");
+        END;
+      ELSE
+        CardSequences.LinkRight(BurgAst.termInfo[tree^.terminal].prodList,prod);
+        IF (BurgAst.prodInfo[prod].predBegin <> 0) AND
+           (BurgAst.termInfo[tree^.terminal].termArity = 0) THEN
+          Error(50); BurgInOut.IdErrorMessage(
+            "leaf production of symbol",BurgAst.termInfo[tree^.terminal].pos,
+            BurgAst.termInfo[tree^.terminal].len,"cannot be conditional");
+        END;
+      END.)
+   (* ---------------------------------------------------------------------- *)
+	    Cost<prod>
+	[   SemAction<prod>   ] "." .
+
+(* -------------------------------------------------------------------- *)
+(* SemAction =  "(." ["<" {ANY} ">"] {ANY} ".)" .	 		*)
+(* -------------------------------------------------------------------- *)
+  SemAction<prod : BurgAst.ProdIndex>
+	=
+      "(."  
+      (
+        "<"
+	      (. BurgAst.prodInfo[prod].decPos := MburgS.nextPos;
+                 BurgAst.prodInfo[prod].decCol := MburgS.nextCol.)
+      {ANY}   (. BurgAst.prodInfo[prod].decEnd := MburgS.pos + INT(MburgS.len).)
+        ">" 
+	      (. BurgAst.prodInfo[prod].semPos := MburgS.nextPos;
+                 BurgAst.prodInfo[prod].semCol := MburgS.nextCol.)
+      {ANY}   (. BurgAst.prodInfo[prod].semEnd := MburgS.pos + INT(MburgS.len).)
+      |
+	      (. BurgAst.prodInfo[prod].semPos := MburgS.nextPos;
+                 BurgAst.prodInfo[prod].semCol := MburgS.nextCol.)
+       ANY
+      {ANY}   (. BurgAst.prodInfo[prod].semEnd := MburgS.pos + INT(MburgS.len).)
+      |
+      ) 
+      ".)" 
+	.
+
+(* -------------------------------------------------------------------- *)
+(* Tree = identifier ["(" Tree ["," Tree] ")"] .	 		*)
+(* -------------------------------------------------------------------- *)
+  Tree<VAR tree : BurgAst.Tree> 
+                     (. VAR isaT : BOOLEAN;
+                            rPos : INTEGER;
+                            rLen : INTEGER;
+                            idnt : INTEGER;.)
+	=
+	identifier   (. rPos := MburgS.pos; rLen := MburgS.len;
+	                BurgAst.LookupT(rPos,rLen,idnt);
+                        IF idnt = 0 THEN
+                          isaT := FALSE;
+                          BurgAst.EnterNT(rPos,rLen,idnt);
+                          tree := BurgAst.NewNtTree(idnt);
+                        ELSE
+                          isaT := TRUE;
+                          tree := BurgAst.NewTmTree(idnt);
+                        END.)
+	(
+          "("
+   (* ----------------------- semantic actions ------------------------ *)
+   (. IF NOT isaT THEN
+        Error(51);
+        BurgInOut.IdErrorMessage("terminal symbol",rPos,rLen,"is undeclared");
+      END.)
+   (* ----------------------------------------------------------------- *)
+	   Tree<tree^.left>  
+	   ( "," 
+              Tree<tree^.right> 
+                     (. IF isaT THEN BurgAst.EnterArity(idnt,2) END.)
+           |         (. IF isaT THEN BurgAst.EnterArity(idnt,1) END.)
+	   )
+	  ")"
+	|            (.(* either: chain prod, or arity = 0 *).)
+                     (. IF isaT THEN BurgAst.EnterArity(idnt,0) END.)
+	).
+
+(* -------------------------------------------------------------------- *)
+(* Cost = [number].							*)
+(* -------------------------------------------------------------------- *)
+  Cost<prod : BurgAst.ProdIndex>
+	=
+        number       (. GetNumber(BurgAst.prodInfo[prod].prodCost).)
+  |                  (. BurgAst.prodInfo[prod].prodCost := 0.)
+  .
+
+(* -------------------------------------------------------------------- *)
+(* PredFunc = ["&" [identifier] ["(" {ANY} ")"]].			*)
+(* -------------------------------------------------------------------- *)
+  PredFunc<prod : BurgAst.ProdIndex>
+                     (. VAR iPos : INTEGER;.)
+	=
+	"&"          (. iPos := MburgS.nextPos;
+                        BurgAst.prodInfo[prod].predBegin := iPos.)
+	[identifier]
+	BalancedPar 
+   (* ----------------------- semantic actions ------------------------ *)
+   (. BurgAst.prodInfo[prod].predLength := MburgS.pos + 1 - iPos.)
+   (* ----------------------------------------------------------------- *)
+  |                  (. BurgAst.prodInfo[prod].predBegin := 0.)
+  .
+
+  BalancedPar = "(" {ANY | BalancedPar} ")" .
+
+(* -------------------------------------------------------------------- *)
+(* NonTerm = identifier.						*)
+(* -------------------------------------------------------------------- *)
+  NonTerm<VAR ntId : INTEGER>
+	=
+	identifier   (. BurgAst.EnterNT(MburgS.pos,MburgS.len,ntId).)
+  .
+
+END Mburg.

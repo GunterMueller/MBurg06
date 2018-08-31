@@ -1,0 +1,7 @@
+(*  This program is copyright (c) 1995 Faculty of Information Technology,
+ *  Queensland University of Technology, Brisbane, Australia.
+ *  The program may be freely distributed in source or compiled form,
+ *  provided this copyright notice remains intact in the sources. 
+ *  Original program, June 1995, John Gough.
+ *)
+

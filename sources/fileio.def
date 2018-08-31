@@ -1,0 +1,160 @@
+DEFINITION MODULE FileIO; 
+(* General file input/output.  Everything required for Coco/R.
+   Based on code by MB 90/11/25; heavily modified and extended PDT 92/1/6
+   THE COMMENTS HAVE BEEN CHANGED TO REFLECT UNIX SEMANTICS    kjg 93/11/27 *)
+
+IMPORT SYSTEM, UxFiles;
+
+FROM Types IMPORT LONGINT; (* same as INTEGER for gpm! *)
+
+CONST
+  EOF = 0C;
+  EOL = 12C; (* == Ascii.lf for UNIX *)
+  ESC = 33C;
+  CR  = 15C;
+  LF  = 12C;
+
+TYPE
+  File = UxFiles.File;
+
+VAR
+  Okay : BOOLEAN;
+  con, err:  File;
+
+PROCEDURE NextParameter (VAR s: ARRAY OF CHAR);
+(* Extracts next parameter from command line. *)
+
+PROCEDURE GetEnv (var: ARRAY OF CHAR; VAR val: ARRAY OF CHAR);
+(* Gets value val of environment variable var. *)
+
+PROCEDURE Open (VAR f: File; filename: ARRAY OF CHAR; output: BOOLEAN);
+(* Opens file f with name filename.
+   output    TRUE:  the specified file is opened for output.  Any existing
+		    file with the same name is deleted.
+	     FALSE: the specified file is opened for input.
+   Okay indicates whether the file f has been opened successfully. *)
+
+PROCEDURE Close (VAR f: File);
+(* Closes file f.  f becomes NIL. *)
+
+PROCEDURE Delete (VAR f : File);
+(* Deletes file f.  f becomes NIL *)
+
+PROCEDURE SearchFile (VAR f: File; env, name: ARRAY OF CHAR; output: BOOLEAN);
+(* Tries to open file of given name by searching each directory specified
+   by the environment variable named by env. *)
+
+
+PROCEDURE ExtractDirectory (fullName: ARRAY OF CHAR;
+                            VAR directory: ARRAY OF CHAR);
+(* Extracts /directory/ portion of fullName *)
+
+PROCEDURE ExtractFileName (fullName: ARRAY OF CHAR;
+                           VAR filename: ARRAY OF CHAR);
+(* Extracts filename.ext portion of fullName *)
+
+PROCEDURE AppendExtension (old, ext: ARRAY OF CHAR; VAR new: ARRAY OF CHAR);
+(* Constructs new filename by appending ext to old name if it doesn't end
+   with "."  Case is left unmodified in UXIX versions
+         old.any ==> old.any
+         old.    ==> old.
+         old     ==> old.ext  *)
+
+PROCEDURE ChangeExtension (old, ext: ARRAY OF CHAR; VAR new: ARRAY OF CHAR);
+(* Constructs new filename by changing extension of old name to ext.
+   Case is left unmodified in UNIX versions.
+         old.any ==> old.ext
+         old.    ==> old.ext
+         old     ==> old.ext  *)
+
+
+PROCEDURE Length (f: File): LONGINT;
+(* Returns length of file f. *)
+
+PROCEDURE GetPos (f: File): LONGINT;
+(* Returns the current position in f. *)
+
+PROCEDURE SetPos (f: File; pos: LONGINT);
+(* Sets the current position in f to pos. *)
+
+PROCEDURE Reset (f : File);
+(* Sets the read/write position to the start of the file *)
+
+PROCEDURE Rewrite (f : File);
+(* Truncates the file, leaving open *)
+
+PROCEDURE EndOfLine (f: File): BOOLEAN;
+(* TRUE if f is currently at the end of a line, or at end of file. *)
+
+PROCEDURE EndOfFile (f: File): BOOLEAN;
+(* TRUE if f is currently at the end of file. *)
+
+PROCEDURE Read (f: File; VAR ch: CHAR);
+(* Reads a character ch from file f.
+   Okay indicates if the operation has been successful. *)
+
+PROCEDURE ReadAgain (f: File);
+(* Prepares to re-read the last character read from f. *)
+
+PROCEDURE ReadLn (f: File);
+(* Reads to start of next line on file f. *)
+
+PROCEDURE ReadString (f: File; VAR str: ARRAY OF CHAR);
+(* Reads a string of characters from file f (leading blanks are skipped, str
+   is delimited by line mark). *)
+
+PROCEDURE ReadLine (f: File; VAR str: ARRAY OF CHAR);
+(* Reads a string of characters from file f, str is terminated by line
+   mark or control character). *)
+
+PROCEDURE ReadToken (f: File; VAR str: ARRAY OF CHAR);
+(* Reads a string of characters from file f (leading blanks and line feeds
+   are skipped, and token is terminated by a character <= ' '). *)
+
+PROCEDURE ReadInt (f: File; VAR i: INTEGER);
+(* Reads an integer value from file f. *)
+
+PROCEDURE ReadCard (f: File; VAR i: CARDINAL);
+(* Reads a cardinal value from file f. *)
+
+PROCEDURE ReadBytes (f: File; VAR buf: ARRAY OF SYSTEM.BYTE; VAR len: CARDINAL);
+(* Reads len bytes from the current file position into buf.
+   After the call len contains the number of bytes read. *)
+
+
+PROCEDURE Write (f: File; ch: CHAR);
+(* Writes a character ch to file f. *)
+
+PROCEDURE WriteLn (f: File);
+(* Skips to the start of the next line on file f. *)
+
+PROCEDURE WriteString (f: File; str: ARRAY OF CHAR);
+(* Writes a string str to file f. *)
+
+PROCEDURE WriteText (f: File; text: ARRAY OF CHAR; len: INTEGER);
+(* Writes text with length len to file f. *)
+
+PROCEDURE WriteInt (f: File; int: INTEGER; wid: CARDINAL);
+(* Writes an INTEGER int into a field of wid characters width.  If the
+   number does not fit into wid characters, wid is expanded. *)
+
+PROCEDURE WriteCard (f: File; card, wid: CARDINAL);
+(* Writes a CARDINAL card into a field of wid characters width.  If the
+   number does not fit into wid characters, wid is expanded. *)
+
+PROCEDURE WriteBytes (f: File; VAR buf: ARRAY OF SYSTEM.BYTE; len: CARDINAL);
+(* Writes len bytes from buf at the current file position. *)
+
+PROCEDURE WriteDate (f: File);
+(* Write current date DD/MM/YY to file f. *)
+
+PROCEDURE WriteTime (f: File);
+(* Write time HH:MM:SS to file f. *)
+
+PROCEDURE WriteElapsedTime (f: File);
+(* Write elapsed time in seconds since last call of this procedure. *)
+
+PROCEDURE WriteExecutionTime (f: File);
+(* Write total execution time in seconds thus far. *)
+
+END FileIO.
